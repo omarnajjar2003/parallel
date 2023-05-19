@@ -1,0 +1,102 @@
+%%cu
+#include <stdio.h>
+#include <stdlib.h>
+#include <cuda_runtime.h>
+
+#define TILE_SIZE 16
+
+__global__ void matrixMultiplication(float* M, float* N, float* P, int Mrows, int Mcolumns, int Ncols) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+
+    __shared__ float M_shared[TILE_SIZE][TILE_SIZE];
+    __shared__ float N_shared[TILE_SIZE][TILE_SIZE];
+
+    float Pvalue = 0;
+
+    for (int t = 0; t < (Mcolumns + TILE_SIZE - 1) / TILE_SIZE; ++t) {
+        if (row < Mrows && (t * TILE_SIZE + threadIdx.x) < Mcolumns) {
+            M_shared[threadIdx.y][threadIdx.x] = M[row * Mcolumns + t * TILE_SIZE + threadIdx.x];
+        }
+        else {
+            M_shared[threadIdx.y][threadIdx.x] = 0;
+        }
+
+        if (col < Ncols && (t * TILE_SIZE + threadIdx.y) < Mcolumns) {
+            N_shared[threadIdx.y][threadIdx.x] = N[(t * TILE_SIZE + threadIdx.y) * Ncols + col];
+        }
+        else {
+            N_shared[threadIdx.y][threadIdx.x] = 0;
+        }
+
+        __syncthreads();
+
+        for (int k = 0; k < TILE_SIZE; ++k) {
+            Pvalue += M_shared[threadIdx.y][k] * N_shared[k][threadIdx.x];
+        }
+
+        __syncthreads();
+    }
+
+    if (row < Mrows && col < Ncols) {
+        P[row * Ncols + col] = Pvalue;
+    }
+}
+
+void initializeMatrix(float* matrix, int rows, int cols) {
+    for (int i = 0; i < rows; ++i) {
+        for (int j = 0; j < cols; ++j) {
+            matrix[i * cols + j] = rand() % 10;
+        }
+    }
+}
+
+int main() {
+    int num_rows_M = 600;
+    int num_cols_M = 600;
+    int num_cols_N = 600;
+
+    float* M, * N, * P;
+    M = (float*)malloc(num_rows_M * num_cols_M * sizeof(float));
+    N = (float*)malloc(num_cols_M * num_cols_N * sizeof(float));
+    P = (float*)malloc(num_rows_M * num_cols_N * sizeof(float));
+
+    initializeMatrix(M, num_rows_M, num_cols_M);
+    initializeMatrix(N, num_cols_M, num_cols_N);
+
+    float* d_M, * d_N, * d_P;
+    cudaMalloc(&d_M, num_rows_M * num_cols_M * sizeof(float));
+    cudaMalloc(&d_N, num_cols_M * num_cols_N * sizeof(float));
+    cudaMalloc(&d_P, num_rows_M * num_cols_N * sizeof(float));
+
+    cudaMemcpy(d_M, M, num_rows_M * num_cols_M * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_N, N, num_cols_M * num_cols_N * sizeof(float), cudaMemcpyHostToDevice);
+
+    dim3 block_size(TILE_SIZE, TILE_SIZE);
+    dim3 grid_size((num_cols_N + block_size.x - 1) / block_size.x, (num_rows_M + block_size.y - 1) / block_size.y);
+
+    cudaEvent_t start, end;
+    float elapsed_time;
+    cudaEventCreate(&start);
+    cudaEventCreate(&end);
+    cudaEventRecord(start);
+
+    matrixMultiplication<<<grid_size, block_size>>>(d_M, d_N, d_P, num_rows_M, num_cols_M, num_cols_N);
+
+    cudaEventRecord(end);
+    cudaEventSynchronize(end);
+    cudaEventElapsedTime(&elapsed_time, start, end);
+
+    cudaMemcpy(P, d_P, num_rows_M * num_cols_N * sizeof(float), cudaMemcpyDeviceToHost);
+
+    free(M);
+    free(N);
+    free(P);
+    cudaFree(d_M);
+    cudaFree(d_N);
+    cudaFree(d_P);
+
+    printf("Time: %.5lf milliseconds\n", elapsed_time);
+
+    return 0;
+}
